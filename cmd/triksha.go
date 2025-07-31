@@ -8,6 +8,7 @@ import (
 
 	"github.com/r4j3sh-com/triksha/core"
 	"github.com/r4j3sh-com/triksha/modules"
+	"github.com/r4j3sh-com/triksha/output"
 )
 
 func main() {
@@ -15,6 +16,9 @@ func main() {
 	targetFlag := flag.String("target", "", "Target domain or IP to scan (required)")
 	configFlag := flag.String("config", "", "Path to JSON config file (optional)")
 	modulesFlag := flag.String("modules", "", "Comma-separated list of modules to run (optional)")
+	jsonOut := flag.String("json", "", "Path to export JSON report")
+	mdOut := flag.String("md", "", "Path to export Markdown report")
+	htmlOut := flag.String("html", "", "Path to export HTML report")
 	flag.Parse()
 
 	var cfg core.Config
@@ -88,6 +92,27 @@ func main() {
 		}
 		fmt.Printf("Result [%s]: %+v\n", action.ModuleName, result.Data)
 		history = append(history, result)
+		if *jsonOut != "" {
+			if err := output.WriteJSONReport(history, *jsonOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to write JSON: %v\n", err)
+			} else {
+				fmt.Println("JSON report exported to", *jsonOut)
+			}
+		}
+		if *mdOut != "" {
+			if err := output.WriteMarkdownReport(history, *mdOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to write Markdown: %v\n", err)
+			} else {
+				fmt.Println("Markdown report exported to", *mdOut)
+			}
+		}
+		if *htmlOut != "" {
+			if err := output.WriteHTMLReport(history, *htmlOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to write HTML: %v\n", err)
+			} else {
+				fmt.Println("HTML report exported to", *htmlOut)
+			}
+		}
 	}
 }
 
