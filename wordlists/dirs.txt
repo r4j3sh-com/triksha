@@ -1,0 +1,11 @@
+admin
+login
+dashboard
+wp-admin
+phpmyadmin
+test
+uploads
+images
+api
+config
+backup
