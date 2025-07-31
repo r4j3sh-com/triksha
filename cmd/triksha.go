@@ -28,13 +28,25 @@ func main() {
 		Store:  make(map[string]interface{}),
 	}
 
-	// Demo: Run all modules one after another
-	for _, modName := range []string{"dummy", "passive", "subdomain", "portscan", "webenum", "vulnscan", "report"} {
-		result, err := engine.RunModule(modName, ctx.Target, ctx)
+	agent := core.NewAgent()
+	history := []core.Result{}
+
+	// AI agent-driven workflow
+	for {
+		action, err := agent.DecideNextAction(ctx, history)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Println("Recon complete.")
+			break
+		}
+		fmt.Printf("[agent] Next: %s (%s)\n", action.ModuleName, action.Reason)
+		result, err := engine.RunModule(action.ModuleName, ctx.Target, ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error in module %s: %v\n", action.ModuleName, err)
+			// Ask agent how to handle error (for future extensibility)
+			agent.RecoverFromError(ctx, history, err)
 			continue
 		}
-		fmt.Printf("Result [%s]: %+v\n", modName, result.Data)
+		fmt.Printf("Result [%s]: %+v\n", action.ModuleName, result.Data)
+		history = append(history, result)
 	}
 }
