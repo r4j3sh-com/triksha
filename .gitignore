@@ -1,0 +1,11 @@
+# Go stuff
+/bin/
+/vendor/
+*.exe
+*.log
+*.test
+.DS_Store
+
+# IDE/Editor
+.idea/
+.vscode/
