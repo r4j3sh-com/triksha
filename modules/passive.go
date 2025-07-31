@@ -3,11 +3,7 @@ package modules
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
-	"strings"
-	"time"
 
 	"github.com/likexian/whois"
 	whoisparser "github.com/likexian/whois-parser"
@@ -56,7 +52,7 @@ func (m *PassiveModule) Run(target string, ctx *core.Context) (core.Result, erro
 	}
 
 	// 3. crt.sh (subdomains by certificate transparency logs)
-	entries, err := fetchCRTshEntries(target)
+	entries, err := FetchCRTshEntries(target)
 	if err == nil {
 		result.CrtshEntries = entries
 	}
@@ -106,43 +102,6 @@ func lookupDNS(domain string, recordType string) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("unsupported DNS type")
 	}
-}
-
-// fetchCRTshEntries scrapes crt.sh for subdomains
-func fetchCRTshEntries(domain string) ([]string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	url := "https://crt.sh/?q=%25." + domain + "&output=json"
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "TrikshaReconBot/1.0")
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var entries []map[string]interface{}
-	if err := json.Unmarshal(body, &entries); err != nil {
-		return nil, err
-	}
-	unique := map[string]bool{}
-	var subdomains []string
-	for _, entry := range entries {
-		nameValue, ok := entry["name_value"].(string)
-		if !ok {
-			continue
-		}
-		for _, sub := range strings.Split(nameValue, "\n") {
-			sub = strings.TrimSpace(sub)
-			if !unique[sub] && sub != "" && strings.HasSuffix(sub, domain) {
-				unique[sub] = true
-				subdomains = append(subdomains, sub)
-			}
-		}
-	}
-	return subdomains, nil
 }
 
 var Passive core.Module = &PassiveModule{}
