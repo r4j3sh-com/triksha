@@ -1,0 +1,8 @@
+{
+    "target": "example.com",
+    "modules": [
+        "passive",
+        "subdomain",
+        "portscan"
+    ]
+}
