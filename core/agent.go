@@ -218,6 +218,35 @@ If all modules have been completed or no further action is needed, respond with:
 
 	fmt.Printf("[DEBUG] Raw LLM response: %s\n", answer)
 
+	// Extract JSON from the response
+	cleanedJSON := extractJSONagent(answer)
+	if cleanedJSON == "" {
+		fmt.Printf("[ERROR] No valid JSON found in LLM response\n")
+
+		// Fallback to a simple module selection if JSON extraction fails
+		fmt.Println("[INFO] Falling back to simple module selection")
+
+		// Simple module selection logic with execution limits
+		for _, name := range allModules {
+			limit := ModuleExecutionLimits[name]
+			if limit == 0 {
+				limit = DefaultMaxExecutions
+			}
+
+			if a.ModuleExecutions[name] < limit {
+				return Action{
+					ModuleName: name,
+					Params:     map[string]interface{}{},
+					Reason:     "fallback selection due to LLM parsing error",
+				}, nil
+			}
+		}
+
+		return Action{}, fmt.Errorf("all modules completed (fallback)")
+	}
+
+	fmt.Printf("[DEBUG] Extracted JSON: %s\n", cleanedJSON)
+
 	// Try to parse the JSON response
 	var parsed struct {
 		Module string                 `json:"module"`
@@ -225,7 +254,7 @@ If all modules have been completed or no further action is needed, respond with:
 		Reason string                 `json:"reason"`
 	}
 
-	if err := json.Unmarshal([]byte(answer), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(cleanedJSON), &parsed); err != nil {
 		fmt.Printf("[ERROR] JSON parse error: %v\n", err)
 
 		// Fallback to a simple module selection if JSON parsing fails
@@ -297,22 +326,242 @@ If all modules have been completed or no further action is needed, respond with:
 }
 
 func (a *LLMAgent) RecoverFromError(ctx *Context, history []Result, err error) (Action, error) {
-	// Optionally implement error handling prompt
-	return Action{
-		ModuleName: "",
-		Params:     nil,
-		Reason:     "skip due to error: " + err.Error(),
-	}, nil
+	// Build module execution status for the prompt
+	allModules := []string{"passive", "subdomain", "portscan", "webenum", "vulnscan", "report"}
+
+	var moduleStatus strings.Builder
+	for _, module := range allModules {
+		count := a.ModuleExecutions[module]
+		limit := ModuleExecutionLimits[module]
+		if limit == 0 {
+			limit = DefaultMaxExecutions
+		}
+
+		status := "available"
+		if count >= limit {
+			status = "completed"
+		}
+
+		moduleStatus.WriteString(fmt.Sprintf("- %s: executed %d/%d times, status: %s\n",
+			module, count, limit, status))
+	}
+
+	// Find the module that caused the error
+	var errorModule string
+	if len(history) > 0 {
+		errorModule = history[len(history)-1].ModuleName
+	}
+
+	// Build a smart prompt for error recovery
+	historyJson, _ := json.MarshalIndent(history, "", "  ")
+
+	prompt := fmt.Sprintf(`You are a penetration testing orchestration agent for Triksha, a recon framework.
+
+TARGET: %s
+
+ERROR OCCURRED: %s
+MODULE THAT FAILED: %s
+
+MODULE EXECUTION STATUS:
+%s
+
+RECON HISTORY:
+%s
+
+Based on the above information, how should we recover from this error?
+
+INSTRUCTIONS:
+1. Analyze the error and determine the best recovery action
+2. Choose one of these actions:
+   - "retry": Try the same module again (good for network timeouts, temporary issues)
+   - "skip": Skip this module and move to the next logical one
+   - "alternative": Run a different module instead (specify which one)
+3. Provide a brief reason for your decision
+4. Format your response EXACTLY as valid JSON:
+
+{
+  "action": "retry|skip|alternative",
+  "module": "module_name_if_alternative",
+  "reason": "brief explanation"
+}
+`, ctx.Target, err.Error(), errorModule, moduleStatus.String(), string(historyJson))
+
+	// Send to LLM
+	fmt.Println("[DEBUG] Sending error recovery prompt to LLM...")
+	answer, err := a.LLMClient.Chat(prompt)
+	if err != nil {
+		fmt.Printf("[ERROR] LLM error during recovery: %v\n", err)
+		// Fall back to simple skip
+		return Action{
+			ModuleName: "",
+			Params:     nil,
+			Reason:     "skip due to error (LLM failed): " + err.Error(),
+		}, nil
+	}
+
+	fmt.Printf("[DEBUG] Raw LLM recovery response: %s\n", answer)
+
+	// Extract JSON from the response
+	cleanedJSON := extractJSONagent(answer)
+	if cleanedJSON == "" {
+		fmt.Printf("[ERROR] No valid JSON found in LLM response\n")
+		return Action{
+			ModuleName: "",
+			Params:     nil,
+			Reason:     "skip due to error (no valid JSON in response)",
+		}, nil
+	}
+
+	// Try to parse the JSON response
+	var parsed struct {
+		Action string `json:"action"`
+		Module string `json:"module"`
+		Reason string `json:"reason"`
+	}
+
+	if err := json.Unmarshal([]byte(cleanedJSON), &parsed); err != nil {
+		fmt.Printf("[ERROR] JSON parse error in recovery: %v\n", err)
+		// Fall back to simple skip
+		return Action{
+			ModuleName: "",
+			Params:     nil,
+			Reason:     "skip due to error (JSON parse failed): " + err.Error(),
+		}, nil
+	}
+
+	// Process the recovery action
+	switch parsed.Action {
+	case "retry":
+		if errorModule == "" {
+			return Action{
+				ModuleName: "",
+				Params:     nil,
+				Reason:     "skip due to error (no module to retry)",
+			}, nil
+		}
+
+		// Check if we've reached the retry limit
+		limit := ModuleExecutionLimits[errorModule]
+		if limit == 0 {
+			limit = DefaultMaxExecutions
+		}
+
+		if a.ModuleExecutions[errorModule] >= limit {
+			return Action{
+				ModuleName: "",
+				Params:     nil,
+				Reason:     fmt.Sprintf("skip due to error (retry limit reached for %s)", errorModule),
+			}, nil
+		}
+
+		// Update execution count for the retry
+		a.ModuleExecutions[errorModule]++
+
+		return Action{
+			ModuleName: errorModule,
+			Params:     nil,
+			Reason:     "retry after error: " + parsed.Reason,
+		}, nil
+
+	case "alternative":
+		if parsed.Module == "" || parsed.Module == "none" {
+			return Action{
+				ModuleName: "",
+				Params:     nil,
+				Reason:     "skip due to error (no alternative specified)",
+			}, nil
+		}
+
+		// Check if the alternative module has reached its limit
+		limit := ModuleExecutionLimits[parsed.Module]
+		if limit == 0 {
+			limit = DefaultMaxExecutions
+		}
+
+		if a.ModuleExecutions[parsed.Module] >= limit {
+			return Action{
+				ModuleName: "",
+				Params:     nil,
+				Reason:     fmt.Sprintf("skip due to error (alternative %s reached execution limit)", parsed.Module),
+			}, nil
+		}
+
+		// Update execution count for the alternative module
+		a.ModuleExecutions[parsed.Module]++
+
+		return Action{
+			ModuleName: parsed.Module,
+			Params:     nil,
+			Reason:     "alternative after error: " + parsed.Reason,
+		}, nil
+
+	default: // "skip" or any other response
+		// Find the next logical module to run
+		for _, name := range allModules {
+			limit := ModuleExecutionLimits[name]
+			if limit == 0 {
+				limit = DefaultMaxExecutions
+			}
+
+			if a.ModuleExecutions[name] < limit && name != errorModule {
+				// Update execution count for the next module
+				a.ModuleExecutions[name]++
+
+				return Action{
+					ModuleName: name,
+					Params:     nil,
+					Reason:     fmt.Sprintf("skip to next module after error: %s", parsed.Reason),
+				}, nil
+			}
+		}
+
+		return Action{
+			ModuleName: "",
+			Params:     nil,
+			Reason:     "skip due to error (no available modules): " + parsed.Reason,
+		}, nil
+	}
 }
 
-// Helper function to extract JSON from a potentially messy LLM response
-/* func extractJSON(text string) string {
-    // Find the first { and last }
-    start := strings.Index(text, "{")
-    end := strings.LastIndex(text, "}")
+// extractJSON extracts valid JSON from a potentially messy LLM response
+func extractJSONagent(text string) string {
+	// If the text is already valid JSON, return it
+	var js interface{}
+	if json.Unmarshal([]byte(text), &js) == nil {
+		return text
+	}
 
-    if start >= 0 && end > start {
-        return text[start : end+1]
-    }
-    return ""
-} */
+	// Find the first { and last }
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+
+	if start >= 0 && end > start {
+		jsonCandidate := text[start : end+1]
+
+		// Validate if it's actually valid JSON
+		if json.Unmarshal([]byte(jsonCandidate), &js) == nil {
+			return jsonCandidate
+		}
+
+		// Try to fix common issues
+
+		// 1. Try removing any trailing commas before closing braces
+		fixedJSON := strings.ReplaceAll(jsonCandidate, ",}", "}")
+		fixedJSON = strings.ReplaceAll(fixedJSON, ", }", "}")
+		if json.Unmarshal([]byte(fixedJSON), &js) == nil {
+			return fixedJSON
+		}
+
+		// 2. Try adding missing quotes around keys
+		// This is a simplified approach - a more robust solution would use regex
+		for _, key := range []string{"module", "params", "reason", "action"} {
+			fixedJSON = strings.ReplaceAll(jsonCandidate, key+":", `"`+key+`":`)
+		}
+		if json.Unmarshal([]byte(fixedJSON), &js) == nil {
+			return fixedJSON
+		}
+	}
+
+	// If we can't extract valid JSON, return empty string
+	return ""
+}

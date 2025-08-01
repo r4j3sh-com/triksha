@@ -16,12 +16,65 @@ import (
 // LLMClient abstracts LLM chat completion
 type LLMClient interface {
 	Chat(prompt string) (string, error)
+	ChatWithTimeout(ctx context.Context, prompt string, timeout time.Duration) (string, error)
 }
 
 // OpenAIClient implements LLMClient for OpenAI API
 type OpenAIClient struct {
 	client *openai.Client
 	model  string
+}
+
+// ChatWithTimeout implements LLMClient interface for OpenAIClient
+func (c *OpenAIClient) ChatWithTimeout(ctx context.Context, prompt string, timeout time.Duration) (string, error) {
+	// Create a new context with the provided timeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	type result struct {
+		response string
+		err      error
+	}
+
+	resultCh := make(chan result, 1)
+
+	go func() {
+		// Use the existing Chat method but with our timeout context
+		req := openai.ChatCompletionRequest{
+			Model: c.model,
+			Messages: []openai.ChatCompletionMessage{
+				{Role: openai.ChatMessageRoleSystem, Content: "You are a penetration testing orchestration agent."},
+				{Role: openai.ChatMessageRoleUser, Content: prompt},
+			},
+			Temperature: 0.7,
+			MaxTokens:   500,
+		}
+
+		resp, err := c.client.CreateChatCompletion(timeoutCtx, req)
+		if err != nil {
+			resultCh <- result{response: "", err: fmt.Errorf("OpenAI API error: %v", err)}
+			return
+		}
+
+		if len(resp.Choices) == 0 {
+			resultCh <- result{response: "", err: fmt.Errorf("OpenAI returned empty choices")}
+			return
+		}
+
+		responseText := strings.TrimSpace(resp.Choices[0].Message.Content)
+		fmt.Printf("[DEBUG] OpenAI response: %s\n", responseText)
+		resultCh <- result{response: responseText, err: nil}
+	}()
+
+	select {
+	case <-timeoutCtx.Done():
+		if timeoutCtx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("OpenAI request timed out after %v", timeout)
+		}
+		return "", timeoutCtx.Err()
+	case res := <-resultCh:
+		return res.response, res.err
+	}
 }
 
 func NewOpenAIClient(apiKey, model string) *OpenAIClient {
@@ -148,6 +201,30 @@ func (c *OllamaClient) Chat(prompt string) (string, error) {
 
 	// If we couldn't extract JSON, return the full response
 	return result, nil
+}
+
+func (c *OllamaClient) ChatWithTimeout(ctx context.Context, prompt string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	type result struct {
+		response string
+		err      error
+	}
+
+	resultCh := make(chan result, 1)
+
+	go func() {
+		resp, err := c.Chat(prompt)
+		resultCh <- result{response: resp, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return "", fmt.Errorf("LLM request timed out after %v", timeout)
+	case res := <-resultCh:
+		return res.response, res.err
+	}
 }
 
 // Add this helper function if it doesn't exist already
