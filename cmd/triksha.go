@@ -19,6 +19,11 @@ func main() {
 	jsonOut := flag.String("json", "", "Path to export JSON report")
 	mdOut := flag.String("md", "", "Path to export Markdown report")
 	htmlOut := flag.String("html", "", "Path to export HTML report")
+	openaiKey := flag.String("openai-key", "", "OpenAI API key")
+	openaiModel := flag.String("openai-model", "gpt-3.5-turbo", "OpenAI model")
+	ollamaURL := flag.String("ollama-url", "", "Ollama base URL (e.g. http://localhost:11434)")
+	ollamaModel := flag.String("ollama-model", "gemma:2b", "Ollama model name")
+	useLLMAgent := flag.Bool("ai", false, "Use LLM agent for recon orchestration")
 	flag.Parse()
 
 	var cfg core.Config
@@ -63,35 +68,59 @@ func main() {
 		Store:  make(map[string]interface{}),
 	}
 
-	agent := core.NewAgent()
-	history := []core.Result{}
+	// Agent selection and initialization
+	var agent core.Agent
+	if *useLLMAgent {
+		fmt.Println("[+] AI agent mode enabled")
 
-	// Choose modules (from config, or all)
-	runModules := cfg.Modules
-	if len(runModules) == 0 {
-		runModules = []string{"passive", "subdomain", "portscan", "webenum", "vulnscan", "report"}
+		if *openaiKey != "" {
+			fmt.Printf("[+] Using OpenAI LLM agent with model: %s\n", *openaiModel)
+			llm := core.NewOpenAIClient(*openaiKey, *openaiModel)
+			agent = core.NewLLMAgent(llm)
+		} else if *ollamaURL != "" {
+			fmt.Printf("[+] Using Ollama LLM agent with model: %s\n", *ollamaModel)
+			llm := core.NewOllamaClient(*ollamaURL, *ollamaModel)
+			agent = core.NewLLMAgent(llm)
+		} else {
+			fmt.Println("[!] Warning: LLM agent requested but no OpenAI key or Ollama URL provided")
+			fmt.Println("[!] Falling back to SimpleAgent")
+			agent = core.NewAgent()
+		}
+	} else {
+		fmt.Println("[+] Using simple agent (non-AI)")
+		agent = core.NewAgent()
 	}
 
+	// AI agent-driven workflow
+	history := []core.Result{}
+
 	for {
+		fmt.Println("\n[*] Asking agent for next action...")
 		action, err := agent.DecideNextAction(ctx, history)
 		if err != nil {
-			fmt.Println("Recon complete.")
+			if strings.Contains(err.Error(), "all modules completed") {
+				fmt.Println("[+] Recon complete: " + err.Error())
+				break
+			}
+			fmt.Fprintf(os.Stderr, "[!] Agent error: %v\n", err)
 			break
 		}
-		// If using user-supplied modules, skip any not in runModules
-		if len(runModules) > 0 && !contains(runModules, action.ModuleName) {
-			history = append(history, core.Result{ModuleName: action.ModuleName})
-			continue
-		}
-		fmt.Printf("[agent] Next: %s (%s)\n", action.ModuleName, action.Reason)
+
+		fmt.Printf("[+] Agent decision: Run module '%s'\n", action.ModuleName)
+		fmt.Printf("[+] Reason: %s\n", action.Reason)
+
 		result, err := engine.RunModule(action.ModuleName, ctx.Target, ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error in module %s: %v\n", action.ModuleName, err)
-			agent.RecoverFromError(ctx, history, err)
+			fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", action.ModuleName, err)
+			// Ask agent how to handle error
+			recoveryAction, _ := agent.RecoverFromError(ctx, history, err)
+			fmt.Printf("[+] Agent recovery suggestion: %s\n", recoveryAction.Reason)
 			continue
 		}
-		fmt.Printf("Result [%s]: %+v\n", action.ModuleName, result.Data)
+
+		fmt.Printf("[+] Module %s completed successfully\n", action.ModuleName)
 		history = append(history, result)
+
 		if *jsonOut != "" {
 			if err := output.WriteJSONReport(history, *jsonOut); err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to write JSON: %v\n", err)

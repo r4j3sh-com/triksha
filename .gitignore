@@ -9,3 +9,6 @@
 # IDE/Editor
 .idea/
 .vscode/
+
+# Results
+/results/
