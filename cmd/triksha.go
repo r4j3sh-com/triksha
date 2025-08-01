@@ -94,6 +94,51 @@ func main() {
 	// AI agent-driven workflow
 	history := []core.Result{}
 
+	// Check if specific modules were requested
+	if *modulesFlag != "" {
+		requestedModules := strings.Split(*modulesFlag, ",")
+		fmt.Printf("[*] Running specific modules: %s\n", strings.Join(requestedModules, ", "))
+
+		for _, modName := range requestedModules {
+			modName = strings.TrimSpace(modName)
+			fmt.Printf("[*] Running module: %s\n", modName)
+
+			result, err := engine.RunModule(modName, ctx.Target, ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", modName, err)
+				continue
+			}
+
+			fmt.Printf("[+] Module %s completed successfully\n", modName)
+			history = append(history, result)
+		}
+
+		// Export results if requested
+		if *jsonOut != "" {
+			if err := output.WriteJSONReport(history, *jsonOut); err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write JSON: %v\n", err)
+			} else {
+				fmt.Printf("[+] JSON report exported to %s\n", *jsonOut)
+			}
+		}
+		if *mdOut != "" {
+			if err := output.WriteMarkdownReport(history, *mdOut); err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write Markdown: %v\n", err)
+			} else {
+				fmt.Printf("[+] Markdown report exported to %s\n", *mdOut)
+			}
+		}
+		if *htmlOut != "" {
+			if err := output.WriteHTMLReport(history, *htmlOut); err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Failed to write HTML: %v\n", err)
+			} else {
+				fmt.Printf("[+] HTML report exported to %s\n", *htmlOut)
+			}
+		}
+
+		return // Exit after running specified modules
+	}
+
 	for {
 		fmt.Println("\n[*] Asking agent for next action...")
 		action, err := agent.DecideNextAction(ctx, history)
