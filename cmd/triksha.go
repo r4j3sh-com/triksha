@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/r4j3sh-com/triksha/core"
 	"github.com/r4j3sh-com/triksha/modules"
@@ -24,6 +25,7 @@ func main() {
 	ollamaURL := flag.String("ollama-url", "", "Ollama base URL (e.g. http://localhost:11434)")
 	ollamaModel := flag.String("ollama-model", "gemma:2b", "Ollama model name")
 	useLLMAgent := flag.Bool("ai", false, "Use LLM agent for recon orchestration")
+	concurrent := flag.Bool("concurrent", false, "Enable concurrent execution of independent modules")
 	flag.Parse()
 
 	var cfg core.Config
@@ -91,101 +93,116 @@ func main() {
 		agent = core.NewAgent()
 	}
 
-	// AI agent-driven workflow
 	history := []core.Result{}
 
-	// Check if specific modules were requested
-	if *modulesFlag != "" {
+	if *concurrent {
+		fmt.Println("[*] Running independent modules concurrently...")
+		var wg sync.WaitGroup
+		var mu sync.Mutex // To safely append to history
+
+		independentModules := []string{"passive", "subdomain", "portscan"}
+		for _, modName := range independentModules {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				fmt.Printf("[*] Starting concurrent module: %s\n", name)
+				result, err := engine.RunModule(name, ctx.Target, ctx)
+
+				mu.Lock()
+				defer mu.Unlock()
+
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", name, err)
+				} else {
+					fmt.Printf("[+] Concurrent module %s completed successfully\n", name)
+					history = append(history, result)
+				}
+			}(modName)
+		}
+		wg.Wait()
+		fmt.Println("[*] Concurrent modules finished.")
+
+		// Now run dependent modules in order
+		fmt.Println("[*] Running dependent modules serially...")
+		dependentModules := []string{"webenum", "vulnscan", "report"}
+		for _, modName := range dependentModules {
+			fmt.Printf("[*] Running module: %s\n", modName)
+			result, err := engine.RunModule(modName, ctx.Target, ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", modName, err)
+				continue
+			}
+			fmt.Printf("[+] Module %s completed successfully\n", modName)
+			history = append(history, result)
+		}
+		fmt.Println("[+] All modules completed.")
+	} else if *modulesFlag != "" {
+		// Run specific modules serially
 		requestedModules := strings.Split(*modulesFlag, ",")
 		fmt.Printf("[*] Running specific modules: %s\n", strings.Join(requestedModules, ", "))
 
 		for _, modName := range requestedModules {
 			modName = strings.TrimSpace(modName)
 			fmt.Printf("[*] Running module: %s\n", modName)
-
 			result, err := engine.RunModule(modName, ctx.Target, ctx)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", modName, err)
 				continue
 			}
-
 			fmt.Printf("[+] Module %s completed successfully\n", modName)
 			history = append(history, result)
 		}
-
-		// Export results if requested
-		if *jsonOut != "" {
-			if err := output.WriteJSONReport(history, *jsonOut); err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Failed to write JSON: %v\n", err)
-			} else {
-				fmt.Printf("[+] JSON report exported to %s\n", *jsonOut)
-			}
-		}
-		if *mdOut != "" {
-			if err := output.WriteMarkdownReport(history, *mdOut); err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Failed to write Markdown: %v\n", err)
-			} else {
-				fmt.Printf("[+] Markdown report exported to %s\n", *mdOut)
-			}
-		}
-		if *htmlOut != "" {
-			if err := output.WriteHTMLReport(history, *htmlOut); err != nil {
-				fmt.Fprintf(os.Stderr, "[!] Failed to write HTML: %v\n", err)
-			} else {
-				fmt.Printf("[+] HTML report exported to %s\n", *htmlOut)
-			}
-		}
-
-		return // Exit after running specified modules
-	}
-
-	for {
-		fmt.Println("\n[*] Asking agent for next action...")
-		action, err := agent.DecideNextAction(ctx, history)
-		if err != nil {
-			if strings.Contains(err.Error(), "all modules completed") {
-				fmt.Println("[+] Recon complete: " + err.Error())
+	} else {
+		// AI agent-driven workflow
+		for {
+			fmt.Println("\n[*] Asking agent for next action...")
+			action, err := agent.DecideNextAction(ctx, history)
+			if err != nil {
+				if strings.Contains(err.Error(), "all modules completed") {
+					fmt.Println("[+] Recon complete: " + err.Error())
+				} else {
+					fmt.Fprintf(os.Stderr, "[!] Agent error: %v\n", err)
+				}
 				break
 			}
-			fmt.Fprintf(os.Stderr, "[!] Agent error: %v\n", err)
-			break
-		}
 
-		fmt.Printf("[+] Agent decision: Run module '%s'\n", action.ModuleName)
-		fmt.Printf("[+] Reason: %s\n", action.Reason)
+			fmt.Printf("[+] Agent decision: Run module '%s'\n", action.ModuleName)
+			fmt.Printf("[+] Reason: %s\n", action.Reason)
 
-		result, err := engine.RunModule(action.ModuleName, ctx.Target, ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", action.ModuleName, err)
-			// Ask agent how to handle error
-			recoveryAction, _ := agent.RecoverFromError(ctx, history, err)
-			fmt.Printf("[+] Agent recovery suggestion: %s\n", recoveryAction.Reason)
-			continue
-		}
-
-		fmt.Printf("[+] Module %s completed successfully\n", action.ModuleName)
-		history = append(history, result)
-
-		if *jsonOut != "" {
-			if err := output.WriteJSONReport(history, *jsonOut); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to write JSON: %v\n", err)
-			} else {
-				fmt.Println("JSON report exported to", *jsonOut)
+			result, err := engine.RunModule(action.ModuleName, ctx.Target, ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[!] Error in module %s: %v\n", action.ModuleName, err)
+				// Ask agent how to handle error
+				recoveryAction, _ := agent.RecoverFromError(ctx, history, err)
+				fmt.Printf("[+] Agent recovery suggestion: %s\n", recoveryAction.Reason)
+				continue
 			}
+
+			fmt.Printf("[+] Module %s completed successfully\n", action.ModuleName)
+			history = append(history, result)
 		}
-		if *mdOut != "" {
-			if err := output.WriteMarkdownReport(history, *mdOut); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to write Markdown: %v\n", err)
-			} else {
-				fmt.Println("Markdown report exported to", *mdOut)
-			}
+	}
+
+	// Export results if requested at the end of the scan
+	if *jsonOut != "" {
+		if err := output.WriteJSONReport(history, *jsonOut); err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to write JSON: %v\n", err)
+		} else {
+			fmt.Printf("[+] JSON report exported to %s\n", *jsonOut)
 		}
-		if *htmlOut != "" {
-			if err := output.WriteHTMLReport(history, *htmlOut); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to write HTML: %v\n", err)
-			} else {
-				fmt.Println("HTML report exported to", *htmlOut)
-			}
+	}
+	if *mdOut != "" {
+		if err := output.WriteMarkdownReport(cfg, history, *mdOut); err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to write Markdown: %v\n", err)
+		} else {
+			fmt.Printf("[+] Markdown report exported to %s\n", *mdOut)
+		}
+	}
+	if *htmlOut != "" {
+		if err := output.WriteHTMLReport(cfg, history, *htmlOut); err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Failed to write HTML: %v\n", err)
+		} else {
+			fmt.Printf("[+] HTML report exported to %s\n", *htmlOut)
 		}
 	}
 }
