@@ -44,3 +44,51 @@ func FetchCRTshEntries(domain string) ([]string, error) {
 	}
 	return subdomains, nil
 }
+
+// FetchCRTshEntries fetches subdomains from crt.sh
+/* func FetchCRTshEntries(domain string) ([]string, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	url := fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain)
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSON response
+	var entries []struct {
+		NameValue string `json:"name_value"`
+	}
+
+	err = json.Unmarshal(body, &entries)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract unique subdomains
+	subdomainMap := make(map[string]bool)
+	for _, entry := range entries {
+		// Split by newlines and process each subdomain
+		for _, subdomain := range strings.Split(entry.NameValue, "\n") {
+			subdomain = strings.TrimSpace(subdomain)
+			if strings.HasSuffix(subdomain, "."+domain) && !subdomainMap[subdomain] {
+				subdomainMap[subdomain] = true
+			}
+		}
+	}
+
+	// Convert map to slice
+	var subdomains []string
+	for subdomain := range subdomainMap {
+		subdomains = append(subdomains, subdomain)
+	}
+
+	return subdomains, nil
+} */
